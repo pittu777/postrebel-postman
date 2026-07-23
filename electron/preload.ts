@@ -1,0 +1,121 @@
+import { contextBridge, ipcRenderer } from 'electron';
+
+export interface ElectronAPI {
+  // Workspace management
+  createWorkspace: (name: string, description?: string) => Promise<any>;
+  loadWorkspaces: () => Promise<any>;
+  setActiveWorkspace: (workspaceId: string) => Promise<any>;
+  updateWorkspace: (workspaceId: string, name: string, description?: string) => Promise<any>;
+  deleteWorkspace: (workspaceId: string) => Promise<any>;
+
+  // Collection management
+  saveCollection: (workspaceId: string | undefined, data: any) => Promise<any>;
+  loadCollections: (workspaceId?: string) => Promise<any>;
+  deleteCollection: (workspaceId: string | undefined, collectionName: string) => Promise<any>;
+
+  // Environment management
+  saveEnvironment: (workspaceId: string | undefined, data: any) => Promise<any>;
+  loadEnvironments: (workspaceId?: string) => Promise<any>;
+
+  // Certificate management
+  saveCertificate: (data: any) => Promise<any>;
+  loadCertificates: () => Promise<any>;
+  deleteCertificate: (id: string) => Promise<any>;
+  loadCertificateFile: () => Promise<any>;
+
+  // HTTP execution
+  executeHttpRequest: (requestConfig: any) => Promise<any>;
+
+  // Git operations
+  gitInit: () => Promise<any>;
+  gitStatus: () => Promise<any>;
+
+  // Settings
+  getSettings: () => Promise<any>;
+  updateSettings: (settings: any) => Promise<any>;
+  savePreference: (key: string, value: any) => Promise<any>;
+  chooseWorkspaceDirectory: () => Promise<any>;
+
+  // Import
+  selectJsonFile: () => Promise<{ success: boolean; content?: string; error?: string }>;
+  selectBinaryFile: () => Promise<{ success: boolean; filePath?: string; fileName?: string; base64Data?: string; error?: string }>;
+
+  // History
+  loadHistory: (workspaceId: string) => Promise<any>;
+  saveHistoryEntry: (workspaceId: string, entry: any) => Promise<any>;
+  truncateHistory: (workspaceId: string, maxPerRequest: number) => Promise<any>;
+
+  // Saved Responses
+  loadSavedResponses: (workspaceId: string) => Promise<any>;
+  saveSavedResponse: (workspaceId: string, entry: any) => Promise<any>;
+  deleteSavedResponse: (workspaceId: string, entryId: string) => Promise<any>;
+  renameSavedResponse: (workspaceId: string, entryId: string, newName: string) => Promise<any>;
+
+  // Runner management
+  loadRunners: (workspaceId: string) => Promise<any>;
+  saveRunner: (workspaceId: string, runner: any) => Promise<any>;
+  deleteRunner: (workspaceId: string, runnerId: string) => Promise<any>;
+  loadRunnerHistory: (workspaceId: string, runnerId: string) => Promise<any>;
+  saveRunnerHistory: (workspaceId: string, entry: any) => Promise<any>;
+}
+
+const api: ElectronAPI = {
+  // Workspace management
+  createWorkspace: (name, description) => ipcRenderer.invoke('create-workspace', name, description),
+  loadWorkspaces: () => ipcRenderer.invoke('load-workspaces'),
+  setActiveWorkspace: (workspaceId) => ipcRenderer.invoke('set-active-workspace', workspaceId),
+  updateWorkspace: (workspaceId, name, description) => ipcRenderer.invoke('update-workspace', workspaceId, name, description),
+  deleteWorkspace: (workspaceId) => ipcRenderer.invoke('delete-workspace', workspaceId),
+
+  // Collection management
+  saveCollection: (workspaceId, data) => ipcRenderer.invoke('save-collection', workspaceId, data),
+  loadCollections: (workspaceId) => ipcRenderer.invoke('load-collections', workspaceId),
+  deleteCollection: (workspaceId, collectionName) => ipcRenderer.invoke('delete-collection', workspaceId, collectionName),
+
+  // Environment management
+  saveEnvironment: (workspaceId, data) => ipcRenderer.invoke('save-environment', workspaceId, data),
+  loadEnvironments: (workspaceId) => ipcRenderer.invoke('load-environments', workspaceId),
+
+  // Certificate management
+  saveCertificate: (data) => ipcRenderer.invoke('save-certificate', data),
+  loadCertificates: () => ipcRenderer.invoke('load-certificates'),
+  deleteCertificate: (id) => ipcRenderer.invoke('delete-certificate', id),
+  loadCertificateFile: () => ipcRenderer.invoke('load-certificate-file'),
+
+  // HTTP execution
+  executeHttpRequest: (requestConfig) => ipcRenderer.invoke('execute-http-request', requestConfig),
+
+  // Git operations
+  gitInit: () => ipcRenderer.invoke('git-init'),
+  gitStatus: () => ipcRenderer.invoke('git-status'),
+
+  // Settings
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  updateSettings: (settings) => ipcRenderer.invoke('update-settings', settings),
+  savePreference: (key, value) => ipcRenderer.invoke('save-preference', key, value),
+  chooseWorkspaceDirectory: () => ipcRenderer.invoke('choose-workspace-directory'),
+
+  // Import
+  selectJsonFile: () => ipcRenderer.invoke('select-json-file'),
+  selectBinaryFile: () => ipcRenderer.invoke('select-binary-file'),
+
+  // History
+  loadHistory: (workspaceId) => ipcRenderer.invoke('load-history', workspaceId),
+  saveHistoryEntry: (workspaceId, entry) => ipcRenderer.invoke('save-history-entry', workspaceId, entry),
+  truncateHistory: (workspaceId, maxPerRequest) => ipcRenderer.invoke('truncate-history', workspaceId, maxPerRequest),
+
+  // Saved Responses
+  loadSavedResponses: (workspaceId) => ipcRenderer.invoke('load-saved-responses', workspaceId),
+  saveSavedResponse: (workspaceId, entry) => ipcRenderer.invoke('save-saved-response', workspaceId, entry),
+  deleteSavedResponse: (workspaceId, entryId) => ipcRenderer.invoke('delete-saved-response', workspaceId, entryId),
+  renameSavedResponse: (workspaceId, entryId, newName) => ipcRenderer.invoke('rename-saved-response', workspaceId, entryId, newName),
+
+  // Runner management
+  loadRunners: (workspaceId) => ipcRenderer.invoke('load-runners', workspaceId),
+  saveRunner: (workspaceId, runner) => ipcRenderer.invoke('save-runner', workspaceId, runner),
+  deleteRunner: (workspaceId, runnerId) => ipcRenderer.invoke('delete-runner', workspaceId, runnerId),
+  loadRunnerHistory: (workspaceId, runnerId) => ipcRenderer.invoke('load-runner-history', workspaceId, runnerId),
+  saveRunnerHistory: (workspaceId, entry) => ipcRenderer.invoke('save-runner-history', workspaceId, entry),
+};
+
+contextBridge.exposeInMainWorld('electronAPI', api);
