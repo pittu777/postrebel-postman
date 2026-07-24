@@ -91,6 +91,7 @@ async function saveEnvironmentData(workspaceId: string | undefined, data: any): 
   return filePath;
 }
 
+// Window state memory & persistence initialization
 const createWindow = async () => {
   const settings = await getSettings();
   const wb = settings.windowBounds;
