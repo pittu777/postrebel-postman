@@ -285,6 +285,7 @@ ipcMain.handle('save-preference', async (event, key: string, value: any) => {
   }
 });
 
+// Native file system dialog IPC handlers
 ipcMain.handle('choose-workspace-directory', async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {

@@ -95,7 +95,7 @@ const api: ElectronAPI = {
   savePreference: (key, value) => ipcRenderer.invoke('save-preference', key, value),
   chooseWorkspaceDirectory: () => ipcRenderer.invoke('choose-workspace-directory'),
 
-  // Import
+  // Import & File dialog channels
   selectJsonFile: () => ipcRenderer.invoke('select-json-file'),
   selectBinaryFile: () => ipcRenderer.invoke('select-binary-file'),
 
