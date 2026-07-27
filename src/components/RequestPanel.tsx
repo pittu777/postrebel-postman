@@ -1,0 +1,937 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { ApiRequest, ApiResponse, Environment, RequestHistoryEntry, Collection, Runner, Certificate } from '../types';
+import { KeyValueEditor } from './KeyValueEditor';
+import { VariableInput } from './VariableInput';
+import { SearchOptions } from './SearchBar';
+import { findMatches, highlightText } from '../utils/searchHighlight';
+import { RunnerCanvas } from './RunnerCanvas';
+import { generateCurl, generateFetch, generatePython } from '../utils/codeGenerator';
+import jsonlint from 'jsonlint-mod';
+
+function formatRelativeTime(isoDate: string): string {
+  const now = Date.now();
+  const then = new Date(isoDate).getTime();
+  const diffMs = now - then;
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 30) return `${diffDay}d ago`;
+  return new Date(isoDate).toLocaleDateString();
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function statusColor(status: number): string {
+  if (status >= 200 && status < 300) return '#4ade80';
+  if (status >= 300 && status < 400) return '#facc15';
+  if (status >= 400) return '#f87171';
+  return '#888';
+}
+
+interface RequestPanelProps {
+  request: ApiRequest | null;
+  environment: Environment | null;
+  activeCollection: Collection | null;
+  onExecute: (request: ApiRequest) => void;
+  onRequestChange: (request: ApiRequest) => void;
+  onUpdateVariable?: (varName: string, newValue: string) => void;
+  isLoading: boolean;
+  requestHistory?: RequestHistoryEntry[];
+  isReadOnly?: boolean;
+  searchTerm?: string;
+  searchOptions?: SearchOptions;
+  activeRunner?: Runner | null;
+  onSaveRunner?: (runner: Runner) => void;
+  onShowRunnerResponse?: (response: ApiResponse, request: ApiRequest) => void;
+  onAddRunner?: (collection: Collection) => void;
+  collections?: Collection[];
+  certificates?: Certificate[];
+}
+
+export const RequestPanel: React.FC<RequestPanelProps> = ({
+  request,
+  environment,
+  activeCollection,
+  onExecute,
+  onRequestChange,
+  onUpdateVariable,
+  isLoading,
+  requestHistory = [],
+  isReadOnly = false,
+  searchTerm = '',
+  searchOptions = { caseSensitive: false, wholeWords: false, useRegex: false },
+  activeRunner = null,
+  onSaveRunner,
+  onShowRunnerResponse,
+  onAddRunner,
+  collections = [],
+  certificates = [],
+}) => {
+  const [activeTab, setActiveTab] = useState<'headers' | 'body' | 'auth' | 'scripts' | 'runner'>('body');
+  const [localRequest, setLocalRequest] = useState<ApiRequest | null>(null);
+  const [jsonValidation, setJsonValidation] = useState<{ valid: boolean; message: string } | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showCodeGen, setShowCodeGen] = useState(false);
+  const [codeTab, setCodeTab] = useState<'curl' | 'fetch' | 'python'>('curl');
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    setLocalRequest(request);
+  }, [request]);
+
+  // Reset to body tab when switching to a different request
+  useEffect(() => {
+    setActiveTab('body');
+  }, [request?.id]);
+
+  // Auto-switch to runner tab when activeRunner changes
+  useEffect(() => {
+    if (activeRunner) {
+      setActiveTab('runner');
+    }
+  }, [activeRunner?.id]);
+
+  // Debounced JSON validation (only when raw subtype is json)
+  const isJsonRaw = localRequest?.body?.type === 'raw' && (localRequest.body.rawSubtype || 'json') === 'json';
+  const rawBody = isJsonRaw ? (localRequest.body!.data as string) : '';
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    if (!isJsonRaw || !rawBody || rawBody.trim() === '') {
+      setJsonValidation(null);
+      return;
+    }
+
+    debounceRef.current = setTimeout(() => {
+      // Replace {{variables}} with placeholder strings before validating.
+      // Also consume surrounding quotes if present, so "{{var}}" doesn't become ""__placeholder__""
+      const sanitized = rawBody.replace(/"?\{\{\w+\}\}"?/g, '"__placeholder__"');
+
+      try {
+        jsonlint.parse(sanitized);
+        setJsonValidation({ valid: true, message: 'Valid JSON' });
+      } catch (err: any) {
+        const msg = err.message || 'Invalid JSON';
+        // Extract just the first line of the error for a compact display
+        const firstLine = msg.split('\n')[0];
+        setJsonValidation({ valid: false, message: firstLine });
+      }
+    }, 300);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [rawBody, isJsonRaw]);
+
+  const renderHighlightedText = (text: string): React.ReactNode => {
+    if (!searchTerm.trim()) return text;
+    const matches = findMatches(text, searchTerm, searchOptions);
+    return highlightText(text, matches);
+  };
+
+  // If a runner is active, show the runner canvas
+  if (activeRunner) {
+    const runnerCollection = collections.find(c => c.id === activeRunner.collectionId);
+    return (
+      <div className="request-panel" style={{ display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}>
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          {runnerCollection ? (
+            <RunnerCanvas
+              runner={activeRunner}
+              collection={runnerCollection}
+              activeEnvironment={environment}
+              certificates={certificates}
+              onSave={onSaveRunner || (() => {})}
+              onShowResponse={onShowRunnerResponse || (() => {})}
+            />
+          ) : (
+            <div style={{ padding: '2rem', color: '#666', textAlign: 'center' }}>
+              Collection not found for this runner.
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (!localRequest) {
+    return (
+      <div className="request-panel">
+        <div style={{ textAlign: 'center', padding: '2rem', color: '#666' }}>
+          Select a request from the sidebar to get started
+        </div>
+      </div>
+    );
+  }
+
+  const updateRequest = (updates: Partial<ApiRequest>) => {
+    const updatedRequest = { ...localRequest, ...updates };
+    setLocalRequest(updatedRequest);
+    if (!isReadOnly) {
+      onRequestChange(updatedRequest);
+    }
+  };
+
+  const updateHeader = (key: string, value: string) => {
+    const headers = { ...localRequest.headers };
+    if (value.trim() === '') {
+      delete headers[key];
+    } else {
+      headers[key] = value;
+    }
+    updateRequest({ headers });
+  };
+
+  const addHeader = () => {
+    const headers = { ...localRequest.headers, '': '' };
+    updateRequest({ headers });
+  };
+
+  return (
+    <div className="request-panel">
+      {isReadOnly && (
+        <div style={{
+          background: '#1a2d2d',
+          borderBottom: '1px solid #0d7377',
+          padding: '0.4rem 1rem',
+          fontSize: '0.78rem',
+          color: '#0d9e9e',
+        }}>
+          📌 Viewing saved request snapshot — changes will not be saved
+        </div>
+      )}
+      <div className="url-bar">
+        <select
+          className="method-select"
+          value={localRequest.method}
+          onChange={(e) => updateRequest({ method: e.target.value as any })}
+        >
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+          <option value="HEAD">HEAD</option>
+          <option value="OPTIONS">OPTIONS</option>
+        </select>
+
+        <VariableInput
+          value={localRequest.url}
+          onChange={(value) => updateRequest({ url: value })}
+          environment={environment}
+          onUpdateVariable={onUpdateVariable}
+          placeholder="Enter request URL"
+          className="url-input"
+        />
+
+        <button
+          className="send-button"
+          onClick={() => onExecute(localRequest)}
+          disabled={isLoading || !environment}
+        >
+          {isLoading ? '...' : 'Send'}
+        </button>
+        <button
+          className={`button ${showHistory ? '' : 'button-secondary'}`}
+          onClick={() => setShowHistory(!showHistory)}
+          title="Request history"
+          style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap' }}
+        >
+          History
+        </button>
+        <button
+          className={`button ${showCodeGen ? '' : 'button-secondary'}`}
+          onClick={() => setShowCodeGen(!showCodeGen)}
+          title="Generate code snippet"
+          style={{ padding: '0.5rem 0.75rem', whiteSpace: 'nowrap' }}
+        >
+          &lt;/&gt; Code
+        </button>
+      </div>
+
+      {showHistory && (() => {
+        const filtered = requestHistory
+          .filter(h => h.requestId === localRequest.id)
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+        return (
+          <div style={{
+            backgroundColor: '#1a1a1a',
+            border: '1px solid #404040',
+            borderRadius: '4px',
+            marginBottom: '0.5rem',
+            maxHeight: '200px',
+            overflowY: 'auto',
+          }}>
+            {filtered.length === 0 ? (
+              <div style={{ padding: '1rem', color: '#666', textAlign: 'center', fontSize: '0.85rem' }}>
+                No history for this request
+              </div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid #333', color: '#888' }}>
+                    <th style={{ padding: '0.4rem 0.6rem', textAlign: 'left' }}>Time</th>
+                    <th style={{ padding: '0.4rem 0.6rem', textAlign: 'left' }}>Method</th>
+                    <th style={{ padding: '0.4rem 0.6rem', textAlign: 'left' }}>URL</th>
+                    <th style={{ padding: '0.4rem 0.6rem', textAlign: 'right' }}>Status</th>
+                    <th style={{ padding: '0.4rem 0.6rem', textAlign: 'right' }}>Duration</th>
+                    <th style={{ padding: '0.4rem 0.6rem', textAlign: 'right' }}>Size</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(entry => (
+                    <tr key={entry.id} style={{ borderBottom: '1px solid #2a2a2a' }}>
+                      <td style={{ padding: '0.4rem 0.6rem', color: '#aaa', whiteSpace: 'nowrap' }}>
+                        {formatRelativeTime(entry.timestamp)}
+                      </td>
+                      <td style={{ padding: '0.4rem 0.6rem' }}>
+                        <span style={{
+                          color: '#e0e0e0',
+                          fontWeight: 600,
+                          fontSize: '0.75rem',
+                        }}>
+                          {entry.method}
+                        </span>
+                      </td>
+                      <td style={{
+                        padding: '0.4rem 0.6rem',
+                        color: '#ccc',
+                        maxWidth: '200px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {entry.url}
+                      </td>
+                      <td style={{
+                        padding: '0.4rem 0.6rem',
+                        textAlign: 'right',
+                        fontWeight: 600,
+                        color: statusColor(entry.status),
+                      }}>
+                        {entry.status || '---'}
+                      </td>
+                      <td style={{ padding: '0.4rem 0.6rem', textAlign: 'right', color: '#aaa' }}>
+                        {entry.time}ms
+                      </td>
+                      <td style={{ padding: '0.4rem 0.6rem', textAlign: 'right', color: '#aaa' }}>
+                        {formatSize(entry.size)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })()}
+
+      {showCodeGen && localRequest && (
+        <div style={{
+          backgroundColor: '#1a1a1a',
+          border: '1px solid #404040',
+          borderRadius: '4px',
+          marginBottom: '0.5rem',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #333', padding: '0.25rem 0.5rem', gap: '0.25rem' }}>
+            {(['curl', 'fetch', 'python'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => setCodeTab(tab)}
+                style={{
+                  background: codeTab === tab ? '#0d7377' : 'transparent',
+                  color: codeTab === tab ? '#fff' : '#aaa',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '0.25rem 0.6rem',
+                  cursor: 'pointer',
+                  fontSize: '0.8rem',
+                }}
+              >
+                {tab === 'curl' ? 'cURL' : tab === 'fetch' ? 'fetch' : 'Python'}
+              </button>
+            ))}
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <button
+                onClick={() => {
+                  const code = codeTab === 'curl'
+                    ? generateCurl(localRequest, environment, activeCollection)
+                    : codeTab === 'fetch'
+                    ? generateFetch(localRequest, environment, activeCollection)
+                    : generatePython(localRequest, environment, activeCollection);
+                  navigator.clipboard.writeText(code).catch(() => {});
+                }}
+                style={{ background: 'transparent', color: '#0d9e9e', border: '1px solid #0d7377', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer', fontSize: '0.75rem' }}
+              >
+                Copy
+              </button>
+              <button
+                onClick={() => setShowCodeGen(false)}
+                style={{ background: 'transparent', color: '#888', border: 'none', cursor: 'pointer', fontSize: '1rem', lineHeight: 1, padding: '0.2rem 0.3rem' }}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <pre style={{
+            backgroundColor: '#0a0a0a',
+            margin: 0,
+            padding: '1rem',
+            overflowX: 'auto',
+            fontSize: '0.8rem',
+            fontFamily: 'monospace',
+            color: '#e0e0e0',
+            maxHeight: '300px',
+            overflowY: 'auto',
+            borderRadius: '0 0 4px 4px',
+          }}>
+            {codeTab === 'curl'
+              ? generateCurl(localRequest, environment, activeCollection)
+              : codeTab === 'fetch'
+              ? generateFetch(localRequest, environment, activeCollection)
+              : generatePython(localRequest, environment, activeCollection)}
+          </pre>
+        </div>
+      )}
+
+      <div className="request-tabs">
+        <button
+          className={`tab ${activeTab === 'headers' ? 'active' : ''}`}
+          onClick={() => setActiveTab('headers')}
+        >
+          Headers
+        </button>
+        <button
+          className={`tab ${activeTab === 'body' ? 'active' : ''}`}
+          onClick={() => setActiveTab('body')}
+        >
+          Body
+        </button>
+        <button
+          className={`tab ${activeTab === 'auth' ? 'active' : ''}`}
+          onClick={() => setActiveTab('auth')}
+        >
+          Auth
+        </button>
+        <button
+          className={`tab ${activeTab === 'scripts' ? 'active' : ''}`}
+          onClick={() => setActiveTab('scripts')}
+        >
+          Scripts
+        </button>
+        <button
+          className={`tab ${activeTab === 'runner' ? 'active' : ''}`}
+          onClick={() => setActiveTab('runner')}
+        >
+          Runner
+        </button>
+      </div>
+
+      {activeTab === 'headers' && (
+        <div>
+          {Object.entries(localRequest.headers).map(([key, value], index) => (
+            <div key={index} style={{ display: 'flex', gap: '0.5rem', margin: '0.5rem 0' }}>
+              <input
+                type="text"
+                placeholder="Header name"
+                value={key}
+                onChange={(e) => {
+                  const newHeaders = { ...localRequest.headers };
+                  delete newHeaders[key];
+                  newHeaders[e.target.value] = value;
+                  updateRequest({ headers: newHeaders });
+                }}
+                className="form-input"
+                style={{ flex: 1 }}
+              />
+              <VariableInput
+                value={value}
+                onChange={(val) => updateHeader(key, val)}
+                environment={environment}
+                onUpdateVariable={onUpdateVariable}
+                placeholder="Header value"
+                className="form-input"
+                style={{ flex: 1 }}
+              />
+              <button
+                onClick={() => {
+                  const newHeaders = { ...localRequest.headers };
+                  delete newHeaders[key];
+                  updateRequest({ headers: newHeaders });
+                }}
+                className="button-secondary button"
+              >
+                ✗
+              </button>
+            </div>
+          ))}
+          <button onClick={addHeader} className="button">
+            + Add Header
+          </button>
+        </div>
+      )}
+
+      {activeTab === 'body' && (
+        <div>
+          <div className="form-group" style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
+            <div style={{ flex: 1 }}>
+              <label>Body Type</label>
+              <select
+                className="form-input"
+                value={localRequest.body?.type || 'none'}
+                onChange={(e) => {
+                  const type = e.target.value as 'none' | 'raw' | 'form-data' | 'x-www-form-urlencoded' | 'binary';
+                  if (type === 'none') {
+                    updateRequest({ body: { type: 'none', data: '' } });
+                  } else if (type === 'raw') {
+                    updateRequest({
+                      body: {
+                        type,
+                        rawSubtype: localRequest.body?.rawSubtype || 'json',
+                        data: typeof localRequest.body?.data === 'string' ? localRequest.body.data : ''
+                      }
+                    });
+                  } else if (type === 'binary') {
+                    updateRequest({
+                      body: {
+                        type: 'binary',
+                        data: localRequest.body?.type === 'binary' ? localRequest.body.data : '',
+                        binaryFileName: localRequest.body?.type === 'binary' ? localRequest.body.binaryFileName : undefined,
+                        binaryFilePath: localRequest.body?.type === 'binary' ? localRequest.body.binaryFilePath : undefined,
+                      }
+                    });
+                  } else {
+                    updateRequest({
+                      body: {
+                        type,
+                        data: '',
+                        formData: localRequest.body?.formData || []
+                      }
+                    });
+                  }
+                }}
+              >
+                <option value="none">None</option>
+                <option value="raw">Raw</option>
+                <option value="x-www-form-urlencoded">x-www-form-urlencoded</option>
+                <option value="form-data">form-data</option>
+                <option value="binary">Binary</option>
+              </select>
+            </div>
+            {localRequest.body?.type === 'raw' && (
+              <div style={{ flex: 1 }}>
+                <label>Format</label>
+                <select
+                  className="form-input"
+                  value={localRequest.body?.rawSubtype || 'json'}
+                  onChange={(e) => {
+                    const rawSubtype = e.target.value as 'text' | 'javascript' | 'json' | 'html' | 'xml';
+                    updateRequest({
+                      body: {
+                        ...localRequest.body!,
+                        rawSubtype
+                      }
+                    });
+                  }}
+                >
+                  <option value="json">JSON</option>
+                  <option value="text">Text</option>
+                  <option value="javascript">JavaScript</option>
+                  <option value="html">HTML</option>
+                  <option value="xml">XML</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          {localRequest.body?.type === 'none' && (
+            <div style={{
+              padding: '1.5rem',
+              textAlign: 'center',
+              color: '#666',
+              fontSize: '0.9rem',
+              fontStyle: 'italic',
+            }}>
+              This request does not have a body
+            </div>
+          )}
+
+          {localRequest.body?.type === 'raw' && (
+            <>
+              <VariableInput
+                value={typeof localRequest.body?.data === 'string' ? localRequest.body.data : ''}
+                onChange={(value) => updateRequest({
+                  body: {
+                    ...localRequest.body!,
+                    type: 'raw',
+                    data: value
+                  }
+                })}
+                environment={environment}
+                onUpdateVariable={onUpdateVariable}
+                placeholder={
+                  (localRequest.body?.rawSubtype || 'json') === 'json'
+                    ? '{\n  "key": "value"\n}'
+                    : (localRequest.body?.rawSubtype === 'xml'
+                      ? '<root>\n  <element>value</element>\n</root>'
+                      : 'Enter request body...')
+                }
+                className="form-textarea"
+                style={{ minHeight: '200px' }}
+                multiline={true}
+              />
+              {jsonValidation && (
+                <div style={{
+                  padding: '0.3rem 0.6rem',
+                  fontSize: '0.78rem',
+                  fontFamily: 'monospace',
+                  color: jsonValidation.valid ? '#4ade80' : '#f87171',
+                  backgroundColor: jsonValidation.valid ? 'rgba(74, 222, 128, 0.08)' : 'rgba(248, 113, 113, 0.08)',
+                  borderRadius: '0 0 4px 4px',
+                  marginTop: '-1px',
+                }}>
+                  {jsonValidation.valid ? '\u2713 ' : '\u2717 '}{jsonValidation.message}
+                </div>
+              )}
+            </>
+          )}
+
+          {localRequest.body?.type === 'binary' && (
+            <div style={{
+              padding: '1rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.75rem',
+            }}>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <button
+                  className="button"
+                  onClick={async () => {
+                    const result = await window.electronAPI.selectBinaryFile();
+                    if (result.success && result.base64Data) {
+                      updateRequest({
+                        body: {
+                          type: 'binary',
+                          data: result.base64Data,
+                          binaryFilePath: result.filePath,
+                          binaryFileName: result.fileName,
+                        }
+                      });
+                    }
+                  }}
+                >
+                  Select File
+                </button>
+                {localRequest.body.binaryFileName && (
+                  <>
+                    <span style={{ color: '#ccc', fontSize: '0.85rem' }}>
+                      {localRequest.body.binaryFileName}
+                    </span>
+                    <button
+                      className="button-secondary button"
+                      onClick={() => {
+                        updateRequest({
+                          body: {
+                            type: 'binary',
+                            data: '',
+                            binaryFileName: undefined,
+                            binaryFilePath: undefined,
+                          }
+                        });
+                      }}
+                      style={{ fontSize: '0.8rem' }}
+                    >
+                      Clear
+                    </button>
+                  </>
+                )}
+              </div>
+              {!localRequest.body.binaryFileName && (
+                <div style={{ color: '#666', fontSize: '0.85rem', fontStyle: 'italic' }}>
+                  No file selected
+                </div>
+              )}
+            </div>
+          )}
+
+          {(localRequest.body?.type === 'form-data' || localRequest.body?.type === 'x-www-form-urlencoded') && (
+            <KeyValueEditor
+              data={localRequest.body?.formData || []}
+              onChange={(formData) => updateRequest({
+                body: {
+                  type: localRequest.body?.type || 'x-www-form-urlencoded',
+                  data: '',
+                  formData
+                }
+              })}
+              placeholder={{ key: 'Parameter name', value: 'Parameter value' }}
+              environment={environment}
+              onUpdateVariable={onUpdateVariable}
+              allowSecrets={true}
+            />
+          )}
+        </div>
+      )}
+
+      {activeTab === 'auth' && (
+        <div>
+          <div className="form-group">
+            <label>Authentication Type</label>
+            <select
+              className="form-input"
+              value={localRequest.auth?.type || 'none'}
+              onChange={(e) => {
+                const type = e.target.value as any;
+                updateRequest({
+                  auth: type === 'none' ? undefined : { type }
+                });
+              }}
+            >
+              {activeCollection?.auth && (
+                <option value="inherit">
+                  Inherit from Collection ({activeCollection.auth.type === 'bearer' ? 'Bearer Token' :
+                                          activeCollection.auth.type === 'basic' ? 'Basic Auth' :
+                                          activeCollection.auth.type === 'jwt' ? 'JWT' : 'No Auth'})
+                </option>
+              )}
+              <option value="none">No Auth</option>
+              <option value="bearer">Bearer Token</option>
+              <option value="basic">Basic Auth</option>
+              <option value="jwt">JWT</option>
+            </select>
+          </div>
+
+          {localRequest.auth?.type === 'bearer' && (
+            <div className="form-group">
+              <label>Bearer Token</label>
+              <VariableInput
+                value={localRequest.auth.bearer || ''}
+                onChange={(value) => updateRequest({
+                  auth: { type: 'bearer', bearer: value }
+                })}
+                environment={environment}
+                onUpdateVariable={onUpdateVariable}
+                placeholder="{{token}} or paste token here"
+                className="form-input"
+              />
+            </div>
+          )}
+
+          {localRequest.auth?.type === 'basic' && (
+            <>
+              <div className="form-group">
+                <label>Username</label>
+                <VariableInput
+                  value={localRequest.auth.basic?.username || ''}
+                  onChange={(value) => updateRequest({
+                    auth: {
+                      type: 'basic',
+                      basic: {
+                        username: value,
+                        password: localRequest.auth?.basic?.password || ''
+                      }
+                    }
+                  })}
+                  environment={environment}
+                  onUpdateVariable={onUpdateVariable}
+                  className="form-input"
+                />
+              </div>
+              <div className="form-group">
+                <label>Password</label>
+                <VariableInput
+                  value={localRequest.auth.basic?.password || ''}
+                  onChange={(value) => updateRequest({
+                    auth: {
+                      type: 'basic',
+                      basic: {
+                        username: localRequest.auth?.basic?.username || '',
+                        password: value
+                      }
+                    }
+                  })}
+                  environment={environment}
+                  onUpdateVariable={onUpdateVariable}
+                  className="form-input"
+                />
+              </div>
+            </>
+          )}
+
+          {localRequest.auth?.type === 'jwt' && (
+            <div className="form-group">
+              <label>JWT Token</label>
+              <VariableInput
+                value={localRequest.auth.jwt || ''}
+                onChange={(value) => updateRequest({
+                  auth: { type: 'jwt', jwt: value }
+                })}
+                environment={environment}
+                onUpdateVariable={onUpdateVariable}
+                placeholder="{{jwt_token}} or paste JWT here"
+                className="form-input"
+              />
+            </div>
+          )}
+
+          {localRequest.auth?.type === 'inherit' && activeCollection?.auth && (
+            <div style={{ backgroundColor: '#f8f9fa', padding: '1rem', borderRadius: '0.5rem', border: '1px solid #e9ecef' }}>
+              <div style={{ fontSize: '0.9rem', color: '#6c757d', marginBottom: '1rem', fontStyle: 'italic' }}>
+                Using authentication from collection "{activeCollection.name}"
+              </div>
+
+              {activeCollection.auth.type === 'bearer' && (
+                <div className="form-group">
+                  <label>Bearer Token (inherited)</label>
+                  <VariableInput
+                    value={activeCollection.auth.bearer || ''}
+                    onChange={() => {}} // Read-only
+                    environment={environment}
+                    onUpdateVariable={onUpdateVariable}
+                    placeholder="{{token}} or paste token here"
+                    className="form-input"
+                    style={{ backgroundColor: '#f8f9fa', cursor: 'not-allowed' }}
+                    disabled
+                  />
+                  <small style={{ color: '#6c757d', fontSize: '0.8rem' }}>
+                    To edit this value, use the 🔐 button on the collection in the sidebar
+                  </small>
+                </div>
+              )}
+
+              {activeCollection.auth.type === 'basic' && (
+                <>
+                  <div className="form-group">
+                    <label>Username (inherited)</label>
+                    <VariableInput
+                      value={activeCollection.auth.basic?.username || ''}
+                      onChange={() => {}} // Read-only
+                      environment={environment}
+                      onUpdateVariable={onUpdateVariable}
+                      className="form-input"
+                      style={{ backgroundColor: '#f8f9fa', cursor: 'not-allowed' }}
+                      disabled
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Password (inherited)</label>
+                    <VariableInput
+                      value={activeCollection.auth.basic?.password || ''}
+                      onChange={() => {}} // Read-only
+                      environment={environment}
+                      onUpdateVariable={onUpdateVariable}
+                      className="form-input"
+                      style={{ backgroundColor: '#f8f9fa', cursor: 'not-allowed' }}
+                      disabled
+                    />
+                  </div>
+                  <small style={{ color: '#6c757d', fontSize: '0.8rem' }}>
+                    To edit these values, use the 🔐 button on the collection in the sidebar
+                  </small>
+                </>
+              )}
+
+              {activeCollection.auth.type === 'jwt' && (
+                <div className="form-group">
+                  <label>JWT Token (inherited)</label>
+                  <VariableInput
+                    value={activeCollection.auth.jwt || ''}
+                    onChange={() => {}} // Read-only
+                    environment={environment}
+                    onUpdateVariable={onUpdateVariable}
+                    placeholder="{{jwt_token}} or paste JWT here"
+                    className="form-input"
+                    style={{ backgroundColor: '#f8f9fa', cursor: 'not-allowed' }}
+                    disabled
+                  />
+                  <small style={{ color: '#6c757d', fontSize: '0.8rem' }}>
+                    To edit this value, use the 🔐 button on the collection in the sidebar
+                  </small>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'runner' && (
+        <div style={{ padding: '2rem', textAlign: 'center' }}>
+          <div style={{
+            border: '1px dashed #444',
+            borderRadius: 8,
+            padding: '2rem',
+            maxWidth: 360,
+            margin: '0 auto',
+          }}>
+            <div style={{ fontSize: '2rem', marginBottom: '0.75rem' }}>▶</div>
+            <div style={{ color: '#e0e0e0', fontWeight: 600, marginBottom: '0.5rem' }}>
+              Create a Runner
+            </div>
+            <div style={{ color: '#888', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+              Chain multiple requests together, pass data between them, and execute them in sequence.
+            </div>
+            {activeCollection && onAddRunner ? (
+              <button
+                className="button"
+                onClick={() => onAddRunner(activeCollection)}
+                style={{ background: '#7c3aed', borderColor: '#9333ea' }}
+              >
+                + New Runner for "{activeCollection.name}"
+              </button>
+            ) : (
+              <div style={{ color: '#666', fontSize: '0.82rem' }}>
+                Use the + button on a collection in the sidebar to create a runner.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'scripts' && (
+        <div>
+          <div className="form-group">
+            <label>Pre-request Script</label>
+            <textarea
+              className="form-textarea"
+              placeholder={`// Example: Set variables
+pm.environment.set("timestamp", Date.now());
+console.log("Request will execute with:", pm.environment.get("api_key"));`}
+              value={localRequest.preRequestScript || ''}
+              onChange={(e) => updateRequest({ preRequestScript: e.target.value })}
+              style={{ minHeight: '150px' }}
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Test Script</label>
+            <textarea
+              className="form-textarea"
+              placeholder={`// Example: Test response and extract token
+pm.test("Status code is 200", () => {
+    pm.expect(pm.response.status).to.equal(200);
+});
+
+const response = pm.response.json();
+if (response.access_token) {
+    pm.environment.set("token", response.access_token);
+    console.log("Token saved:", response.access_token);
+}`}
+              value={localRequest.testScript || ''}
+              onChange={(e) => updateRequest({ testScript: e.target.value })}
+              style={{ minHeight: '150px' }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
